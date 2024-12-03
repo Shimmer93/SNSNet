@@ -13,6 +13,7 @@ from .loading import LoadImage
 from .mix_img_transforms import Mosaic, YOLOXMixUp
 from .pose3d_transforms import RandomFlipAroundRoot
 from .topdown_transforms import TopdownAffine
+from .jbf_loading import LoadImagePair
 
 __all__ = [
     'GetBBoxCenterScale', 'RandomBBoxTransform', 'RandomFlip',
@@ -22,5 +23,5 @@ __all__ = [
     'GenerateTarget', 'KeypointConverter', 'RandomFlipAroundRoot',
     'FilterAnnotations', 'YOLOXHSVRandomAug', 'YOLOXMixUp', 'Mosaic',
     'BottomupRandomCrop', 'BottomupRandomChoiceResize', 'HandRandomFlip',
-    'SingleHandConverter'
+    'SingleHandConverter', 'LoadImagePair'
 ]
