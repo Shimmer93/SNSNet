@@ -20,3 +20,20 @@ __all__ = [
     'JhmdbDataset', 'PoseTrack18VideoDataset', 'HumanArtDataset',
     'HumanArt21Dataset', 'ExlposeDataset', 'JBFJhmdbDataset'
 ]
+
+str_to_dataset = {
+    'CocoDataset': CocoDataset,
+    'MpiiDataset': MpiiDataset,
+    'MpiiTrbDataset': MpiiTrbDataset,
+    'AicDataset': AicDataset,
+    'CrowdPoseDataset': CrowdPoseDataset,
+    'OCHumanDataset': OCHumanDataset,
+    'MhpDataset': MhpDataset,
+    'PoseTrack18Dataset': PoseTrack18Dataset,
+    'JhmdbDataset': JhmdbDataset,
+    'PoseTrack18VideoDataset': PoseTrack18VideoDataset,
+    'HumanArtDataset': HumanArtDataset,
+    'HumanArt21Dataset': HumanArt21Dataset,
+    'ExlposeDataset': ExlposeDataset,
+    'JBFJhmdbDataset': JBFJhmdbDataset
+}

@@ -1,4 +1,4 @@
-_base_ = ['../../../_base_/default_runtime.py']
+_base_ = ['../../_base_/default_runtime.py']
 
 # runtime
 train_cfg = dict(max_epochs=100, val_interval=10)
@@ -36,7 +36,7 @@ data_root = '/home/zpengac/datasets/har/jhmdb'
 
 # codec settings
 codec = dict(
-    type='PoseSegmentationMask', input_size=(256, 256), mask_size=(256, 256), dataset_type=dataset_type, sigma=3, use_flow=True)
+    type='JBFCodec', input_size=(256, 256), mask_size=(256, 256), dataset_type=dataset_type, sigma=3, use_flow=True)
 
 # model settings
 model = dict(
@@ -150,8 +150,8 @@ val_pipeline = [
 
 # data loaders
 train_dataloader = dict(
-    batch_size=16,
-    num_workers=2,
+    batch_size=64,
+    num_workers=8,
     persistent_workers=True,
     sampler=dict(type='DefaultSampler', shuffle=True),
     dataset=dict(
@@ -163,8 +163,8 @@ train_dataloader = dict(
         pipeline=train_pipeline,
     ))
 val_dataloader = dict(
-    batch_size=8,
-    num_workers=2,
+    batch_size=32,
+    num_workers=8,
     persistent_workers=True,
     drop_last=False,
     sampler=dict(type='DefaultSampler', shuffle=False, round_up=False),

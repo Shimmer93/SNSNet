@@ -19,6 +19,7 @@ Part of the official repo for paper "JBF: An Enhanced Representation of Skeleton
 4. Install additional dependencies:
     ```
     pip install -r requirements.txt
+    pip install -v -e .
     ```
 5. (Optional, bug exists with certain CUDA versions) Install alternate correlation implementation from [RAFT]('https://github.com/princeton-vl/RAFT/tree/master'):
     ```

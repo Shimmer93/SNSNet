@@ -281,14 +281,12 @@ def generate_jbf(pose_sample: PoseDataSample, bbox, rescale_ratio=1.0):
     jbf = (jbf > 0.5).astype(np.uint8) * 255
     
     J, H, W = jbf.shape
-    canvas = np.zeros((H * J, W), dtype=np.uint8)
-    for i in range(J):
-        canvas[i*H:(i+1)*H, :] = jbf[i]
+    jbf = jbf.reshape(J*H, W)
     
     return dict(
-        jbf=canvas,
+        jbf=jbf,
         bbox=bbox,
-        shape=(H, W),
+        nmaps=J,
         ratio=rescale_ratio
     )
 

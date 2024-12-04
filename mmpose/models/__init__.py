@@ -9,6 +9,7 @@ from .heads import *  # noqa
 from .losses import *  # noqa
 from .necks import *  # noqa
 from .pose_estimators import *  # noqa
+from .flownets import *  # noqa
 
 __all__ = [
     'BACKBONES',

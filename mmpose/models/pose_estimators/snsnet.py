@@ -59,8 +59,6 @@ class SNSNet(BasePoseEstimator):
             init_cfg=init_cfg,
             metainfo=metainfo)
 
-        # os.makedirs('./input', exist_ok=True)
-        
         self.flownet = MODELS.build(flownet)
         self.backbone_flow = MODELS.build(backbone_flow)
         self.use_flow = use_flow                                                                            
@@ -90,17 +88,27 @@ class SNSNet(BasePoseEstimator):
             tuple[Tensor]: Multi-level features that may have various
             resolutions.
         """
-        global count
-        count += 1
-        # self.flownet.eval()
-
         x0, x1 = inputs[:, :3, ...], inputs[:, 3:, ...]
 
         with torch.no_grad():
             flow = self.flownet(x0, x1)[-1].detach()
+
+            # naive fix for noisy output of RAFT on no-motion images
+            # for i in range(len(flow)):
+            #     fm = torch.sqrt(flow[i, 0]**2 + flow[i, 1]**2)
+            #     if fm.max() < 0.01:
+            #         flow[i] = torch.zeros_like(flow[i])
+
             flow_mean = torch.mean(flow, dim=(2, 3), keepdim=True)
             flow_std = torch.std(flow, dim=(2, 3), keepdim=True)
+
             flow_ = (flow - flow_mean) / flow_std
+
+            # naive fix for noisy output of RAFT on no-motion images
+            for i in range(len(flow_)):
+                if torch.abs(flow_mean[i]).max() < 0.02 and flow_std[i].max() < 0.02:
+                    # print(torch.abs(flow_mean[i]).max(), flow_std[i].max())
+                    flow[i] = torch.zeros_like(flow[i], device=flow.device, dtype=flow_.dtype)
 
         x_body = self.backbone(x0)
         if self.with_neck:
@@ -285,9 +293,6 @@ class SNSNetSmall(SNSNet):
             tuple[Tensor]: Multi-level features that may have various
             resolutions.
         """
-        global count
-        count += 1
-        # self.flownet.eval()
         b = inputs.shape[0]
         x0, x1 = inputs[:, :3, ...], inputs[:, 3:, ...]
 

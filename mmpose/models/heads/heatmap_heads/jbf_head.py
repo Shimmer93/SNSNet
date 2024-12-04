@@ -710,12 +710,19 @@ class FlowMaskHead(SimplifiedPointRendMaskHead):
         point_coords = []
         point_labels = []
 
-        for(i, (pos_mask, neg_mask)) in enumerate(zip(pos_masks, neg_masks)):
+        for(i, (pos_mask, neg_mask, flow)) in enumerate(zip(pos_masks, neg_masks, flows)):
+            if torch.abs(flow).max() < 1e-8:
+                pos_mask_ = torch.zeros_like(pos_mask, dtype=torch.bool, device=features.device)
+                neg_mask_ = torch.ones_like(neg_mask, dtype=torch.bool, device=features.device)
+            else:
+                pos_mask_ = pos_mask
+                neg_mask_ = neg_mask
 
             if torch.sum(neg_mask) == 0:
                 neg_mask[0, 0] = True
-            neg_idxs = torch.nonzero(neg_mask).flip(1)
-            pos_idxs = torch.nonzero(pos_mask).flip(1)
+
+            neg_idxs = torch.nonzero(neg_mask_).flip(1)
+            pos_idxs = torch.nonzero(pos_mask_).flip(1)
 
             if len(pos_idxs) == 0:
                 num_samples = self.mask_point_train_num_points

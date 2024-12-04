@@ -6,9 +6,9 @@ from copy import deepcopy
 
 from mmpose.registry import KEYPOINT_CODECS
 from mmpose.datasets.datasets.body import str_to_dataset
-from mmpose.codecs.base import BaseKeypointCodec
-from mmpose.codecs.utils.post_processing import get_heatmap_maximum
-from mmpose.codecs.utils.refinement import refine_keypoints, refine_keypoints_dark
+from .base import BaseKeypointCodec
+from .utils.post_processing import get_heatmap_maximum
+from .utils.refinement import refine_keypoints, refine_keypoints_dark
 
 def draw_line(canvas, start, end, value=1, overlength=0):
     # canvas: torch.Tensor of shape (height, width)
