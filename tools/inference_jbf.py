@@ -310,15 +310,12 @@ def generate_jbf(pose_sample: PoseDataSample, bbox, rescale_ratio=1.0):
     
     J, H, W = jbf.shape
     jbf = jbf.reshape(J*H, W)
+    jbf = Image.fromarray(jbf)
+    jbf = encode_mask(jbf)
     
-    return dict(
-        jbf=jbf,
-        bbox=bbox,
-        nmaps=J,
-        ratio=rescale_ratio
-    )
+    return jbf
 
-def jbf_inference(model, frames, det_results, batched=True, batch_size_pose=16):
+def jbf_inference(model, frames, det_results, rescale_ratio=1.0, batched=True, batch_size_pose=16):
     assert len(frames) == len(det_results)
 
     data = list(zip(frames, det_results))
@@ -338,8 +335,9 @@ def jbf_inference(model, frames, det_results, batched=True, batch_size_pose=16):
     jbf_seq = []
     for i, pose_sample in enumerate(pose_samples):
         bbox = det_results[i]
-        jbf = generate_jbf(pose_sample, bbox)
+        jbf = generate_jbf(pose_sample, bbox, rescale_ratio)
         jbf_seq.append(jbf)
+    
     return jbf_seq
 
 def load_jbf_models(det_config, det_ckpt, skl_config, skl_ckpt, jbf_config, jbf_ckpt, flow_ckpt):
@@ -380,6 +378,7 @@ def parse_args():
     parser.add_argument('--flow-ckpt', type=str, default=default_flow_ckpt)
     parser.add_argument('--video-dir', type=str, help='input video directory')
     parser.add_argument('--out-dir', type=str, help='output JBF directory')
+    parser.add_argument('--rescale-ratio', type=float, help='rescale ratio for JBF', default=4.0)
     parser.add_argument('--batched', action='store_true', help='whether to use batched inference')
     parser.add_argument('--batch-size-outer', type=int, default=64)
     parser.add_argument('--batch-size-det', type=int, default=16)
@@ -423,12 +422,14 @@ def main():
         my_part = annos[rank::world_size]
 
     print('Loading JBF models...')
-    det_model, skl_model, jbf_model = load_jbf_models(args.pose_config, args.pose_ckpt, args.flow_ckpt)
+    det_model, skl_model, jbf_model = load_jbf_models(args.det_config, args.det_ckpt, args.skl_config, args.skl_ckpt, 
+                                                      args.jbf_config, args.jbf_ckpt, args.flow_ckpt)
 
     compact = MMCompact(padding=0.25, threshold=10, hw_ratio=(1., 1.), allow_imgpad=True)
     resize = Resize(scale=(256, 256), keep_ratio=False, interpolation='bilinear')
 
     print('Generating JBF...')
+    os.makedirs(args.out_dir, exist_ok=True)
     results = []
     for anno in tqdm(my_part):
         frames = extract_frame(anno['filename'])
@@ -467,7 +468,7 @@ def main():
 
             shape = batch[0].shape[:2]
             new_anno['img_shape'] = shape
-            new_anno = skl_inference(new_anno, skl_model, batch, det_results, compress=args.compress, batch_size_pose=16)
+            new_anno = skl_inference(new_anno, skl_model, batch, det_results)
 
             all_new_annos.append(new_anno)
         
@@ -486,12 +487,13 @@ def main():
         frames = anno['imgs']
         batch_frames = [frames[j:j+args.batch_size_outer] for j in range(0, len(frames), args.batch_size_outer)]
 
-        for i, (batch, det_results) in enumerate(zip(batch_frames, all_det_results)):
+        for i, (batch, det_results) in enumerate(zip(batch_frames, batch_det_results)):
             batch_next = cp.deepcopy(batch)
             batch_next.pop(0)
             batch_next.append(batch[-1] if i + 1 == len(batch_frames) else batch_frames[i+1][0])
+            batch_ = np.concatenate([batch, batch_next], axis=-1)
 
-            jbf_seq = jbf_inference(jbf_model, batch, det_results, frame_dir, args.out_dir, args.batched, args.batch_size_jbf)
+            jbf_seq = jbf_inference(jbf_model, batch_, det_results, args.rescale_ratio, args.batched, args.batch_size_jbf)
             all_jbf_seqs.extend(jbf_seq)
 
         out_fn = osp.join(args.out_dir, f'{frame_dir}.npy')

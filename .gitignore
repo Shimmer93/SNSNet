@@ -1,5 +1,7 @@
 logs/
 train.sh
+slurm-*.out
+play.ipynb
 
 # Byte-compiled / optimized / DLL files
 __pycache__/

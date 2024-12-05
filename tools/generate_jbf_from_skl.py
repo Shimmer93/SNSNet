@@ -282,15 +282,12 @@ def generate_jbf(pose_sample: PoseDataSample, bbox, rescale_ratio=1.0):
     
     J, H, W = jbf.shape
     jbf = jbf.reshape(J*H, W)
+    jbf = Image.fromarray(jbf)
+    jbf = encode_mask(jbf)
     
-    return dict(
-        jbf=jbf,
-        bbox=bbox,
-        nmaps=J,
-        ratio=rescale_ratio
-    )
+    return jbf
 
-def jbf_inference(model, frames, det_results, frame_dir, out_dir, batched=True, batch_size_pose=16):
+def jbf_inference(model, frames, det_results, rescale_ratio=1.0, batched=True, batch_size_pose=16):
     assert len(frames) == len(det_results)
 
     data = list(zip(frames, det_results))
@@ -310,13 +307,13 @@ def jbf_inference(model, frames, det_results, frame_dir, out_dir, batched=True, 
     jbf_seq = []
     for i, pose_sample in enumerate(pose_samples):
         bbox = det_results[i]
-        jbf = generate_jbf(pose_sample, bbox)
+        jbf = generate_jbf(pose_sample, bbox, rescale_ratio)
         jbf_seq.append(jbf)
     
     return jbf_seq
 
-def load_jbf_model(pose_config, pose_ckpt, flow_ckpt):
-    model = init_model(pose_config, pose_ckpt, 'cuda')
+def load_jbf_model(jbf_config, jbf_ckpt, flow_ckpt):
+    model = init_model(jbf_config, jbf_ckpt, 'cuda')
     flow_sd = torch.load(flow_ckpt, map_location='cpu')['state_dict']
     sd_backbone_flow = OrderedDict()
     for k, v in flow_sd.items():
@@ -346,6 +343,7 @@ def parse_args():
     parser.add_argument('--video-dir', type=str, help='input video directory')
     parser.add_argument('--video-suffix', type=str, help='input video name suffix', default='.mp4')
     parser.add_argument('--out-dir', type=str, help='output JBF directory')
+    parser.add_argument('--rescale-ratio', type=float, help='rescale ratio for JBF', default=4.0)
     parser.add_argument('--batched', action='store_true', help='whether to use batched inference')
     parser.add_argument('--batch-size-jbf', type=int, default=16)
     parser.add_argument('--out', type=str, help='output pickle name')
@@ -364,7 +362,7 @@ def main():
     
     print('Loading annotations...')
     with open(args.anno_path, 'rb') as f:
-        annos = pickle.load(f)['annotatios']
+        annos = pickle.load(f)['annotations']
     for anno in annos:
         anno['filename'] = osp.join(args.video_dir, anno['frame_dir'] + args.video_suffix)
         anno['bboxes'] = get_bboxes_from_skeletons(anno['keypoint'], anno['img_shape'][0], anno['img_shape'][1])
@@ -382,17 +380,19 @@ def main():
         my_part = annos[rank::world_size]
 
     print('Loading JBF model...')
-    model = load_jbf_model(args.pose_config, args.pose_ckpt, args.flow_ckpt)
+    model = load_jbf_model(args.jbf_config, args.jbf_ckpt, args.flow_ckpt)
 
     compact = MMCompact(padding=0.25, threshold=10, hw_ratio=(1., 1.), allow_imgpad=True)
     resize = Resize(scale=(256, 256), keep_ratio=False, interpolation='bilinear')
 
     print('Generating JBF...')
+    os.makedirs(args.out_dir, exist_ok=True)
     results = []
     for anno in tqdm(my_part):
         frames = extract_frame(anno['filename'])
 
         anno_tmp = cp.deepcopy(anno)
+        anno_tmp['imgs'] = frames
         anno_tmp = compact(anno_tmp)
         anno_tmp = resize(anno_tmp)
         frames = anno_tmp['imgs']
@@ -404,13 +404,12 @@ def main():
 
         det_results = anno['bboxes']
         frame_dir = anno['frame_dir']
-        jbf_seq = jbf_inference(model, frames, det_results, args.batched, args.batch_size_jbf)
+        jbf_seq = jbf_inference(model, frames, det_results, args.rescale_ratio, args.batched, args.batch_size_jbf)
         
         out_fn = osp.join(args.out_dir, f'{frame_dir}.npy')
         np.save(out_fn, np.array(jbf_seq, dtype=object), allow_pickle=True)
 
         anno_tmp.pop('imgs')
-        anno_tmp.pop('bboxes')
         anno_tmp.pop('filename')
         results.append(anno_tmp)
 

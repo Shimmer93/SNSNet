@@ -140,8 +140,8 @@ train_pipeline = [
 ]
 val_pipeline = [
     dict(type='LoadImagePair'),
-    dict(type='GetBBoxCenterScale'),
-    dict(type='TopdownAffine', input_size=codec['input_size']),
+    # dict(type='GetBBoxCenterScale'),
+    # dict(type='TopdownAffine', input_size=codec['input_size']),
     dict(type='PackPoseInputs')
 ]
 
