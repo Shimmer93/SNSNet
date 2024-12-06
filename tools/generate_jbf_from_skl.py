@@ -288,7 +288,7 @@ def generate_jbf(pose_sample: PoseDataSample, bbox, rescale_ratio=1.0):
     return jbf
 
 def jbf_inference(model, frames, det_results, rescale_ratio=1.0, batched=True, batch_size_pose=16):
-    assert len(frames) == len(det_results)
+    
 
     data = list(zip(frames, det_results))
     pose_samples = []
@@ -389,6 +389,10 @@ def main():
     os.makedirs(args.out_dir, exist_ok=True)
     results = []
     for anno in tqdm(my_part):
+        det_results = anno['bboxes']
+        frame_dir = anno['frame_dir']
+        out_fn = osp.join(args.out_dir, f'{frame_dir}.npy')
+        
         frames = extract_frame(anno['filename'])
 
         anno_tmp = cp.deepcopy(anno)
@@ -402,13 +406,18 @@ def main():
         frames_next.append(frames[-1])
         frames = np.concatenate([frames, frames_next], axis=-1)
 
-        det_results = anno['bboxes']
-        frame_dir = anno['frame_dir']
+        # Not rigidly aligned but should be close enough
+        num_frames = min(len(frames), len(det_results))
+        frames = frames[:num_frames]
+        det_results = det_results[:num_frames]
+        if abs(len(frames) - len(det_results)) > 1:
+            print(f'Warning: {frame_dir} frame and detection results length mismatch, {len(frames)} frames vs {len(det_results)} detection results.')
+
         jbf_seq = jbf_inference(model, frames, det_results, args.rescale_ratio, args.batched, args.batch_size_jbf)
-        
-        out_fn = osp.join(args.out_dir, f'{frame_dir}.npy')
         np.save(out_fn, np.array(jbf_seq, dtype=object), allow_pickle=True)
 
+        anno_tmp['keypoint'] = anno_tmp['keypoint'].astype(np.float16)
+        anno_tmp['keypoint_score'] = anno_tmp['keypoint_score'].astype(np.float16)
         anno_tmp.pop('imgs')
         anno_tmp.pop('filename')
         results.append(anno_tmp)

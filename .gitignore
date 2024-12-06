@@ -1,4 +1,5 @@
 logs/
+checkpoints/
 train.sh
 slurm-*.out
 play.ipynb
