@@ -392,7 +392,6 @@ def main():
         det_results = anno['bboxes']
         frame_dir = anno['frame_dir']
         out_fn = osp.join(args.out_dir, f'{frame_dir}.npy')
-        
         frames = extract_frame(anno['filename'])
 
         anno_tmp = cp.deepcopy(anno)

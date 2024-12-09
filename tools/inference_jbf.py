@@ -444,7 +444,7 @@ def main():
         for i, batch in enumerate(batch_frames):
             det_results = detection_inference(det_model, batch, batch_size_det=args.batch_size_det)
             # * Get detection results for human
-            for i, det_sample in enumerate(det_results):
+            for j, det_sample in enumerate(det_results):
                 # * filter boxes with small scores
                 res = det_sample.pred_instances.bboxes.cpu().numpy()
                 scores = det_sample.pred_instances.scores.cpu().numpy()
@@ -453,7 +453,7 @@ def main():
                 box_areas = (res[:, 3] - res[:, 1]) * (res[:, 2] - res[:, 0])
                 assert np.all(box_areas >= 0)
                 res = res[box_areas >= args.det_area_thr]
-                det_results[i] = res
+                det_results[j] = res
             all_det_results.extend(det_results)
 
         total_frames = len(frames)
@@ -482,7 +482,6 @@ def main():
 
         anno = compact(anno)
         anno = resize(anno)
-        results.append(anno)
 
         frames = anno['imgs']
         batch_frames = [frames[j:j+args.batch_size_outer] for j in range(0, len(frames), args.batch_size_outer)]
@@ -496,8 +495,10 @@ def main():
             jbf_seq = jbf_inference(jbf_model, batch_, det_results, args.rescale_ratio, args.batched, args.batch_size_jbf)
             all_jbf_seqs.extend(jbf_seq)
 
+        anno.pop('imgs')
+        results.append(anno)
         out_fn = osp.join(args.out_dir, f'{frame_dir}.npy')
-        np.save(out_fn, np.array(jbf_seq, dtype=object), allow_pickle=True)
+        np.save(out_fn, np.array(all_jbf_seqs, dtype=object), allow_pickle=True)
 
     print('Saving results...')
     if args.non_dist:
