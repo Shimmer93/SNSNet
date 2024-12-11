@@ -13,8 +13,10 @@ from glob import glob
 from mmengine import load, dump
 from mmengine.dist.utils import get_dist_info, init_dist
 from mmdet.apis import inference_detector, init_detector
-from mmpose.apis import inference_topdown_batch, inference_topdown, init_model
+from mmpose.apis import inference_topdown, inference_topdown_batch, inference_topdown_grouped, inference_topdown_batch_grouped, init_model
+from mmpose.apis.inference_tracking import _track_by_iou, _track_by_oks
 from mmpose.utils import adapt_mmdet_pipeline, generate_jbf, save_jbf_seq, JBFInferenceCompact, JBFInferenceResize
+from mmpose.structures import bbox_xyxy2cs, bbox_cs2xyxy
 
 default_det_config = 'demo/mmdetection_cfg/faster_rcnn_r50_fpn_coco.py'
 default_det_ckpt = '/scratch/PI/cqf/har_data/weights/faster_rcnn_r50_fpn_1x_coco_20200130-047c8118.pth'
@@ -28,7 +30,7 @@ def extract_frame(video_path):
     vid = decord.VideoReader(video_path)
     return [x.asnumpy() for x in vid]
 
-def det_inference(model, frames, batched=True, batch_size_det=16):
+def det_inference(model, frames, det_score_thr, det_area_thr, batched=True, batch_size_det=16):
     results = []
     if batched:
         batches = [frames[i:i+batch_size_det] for i in range(0, len(frames), batch_size_det)]
@@ -39,6 +41,17 @@ def det_inference(model, frames, batched=True, batch_size_det=16):
         for frame in frames:
             result = inference_detector(model, frame)
             results.append(result)
+
+    for j, det_sample in enumerate(results):
+        # * filter boxes with small scores
+        res = det_sample.pred_instances.bboxes.cpu().numpy()
+        scores = det_sample.pred_instances.scores.cpu().numpy()
+        res = res[scores >= det_score_thr]
+        # * filter boxes with small areas
+        box_areas = (res[:, 3] - res[:, 1]) * (res[:, 2] - res[:, 0])
+        assert np.all(box_areas >= 0)
+        res = res[box_areas >= det_area_thr]
+        results[j] = res
 
     return results
 
@@ -60,30 +73,90 @@ def skl_inference(anno_in, model, frames, det_results):
     anno['keypoint_score'] = kp_score.astype(np.float16)
     return anno
 
-def jbf_inference(model, frames, det_results, rescale_ratio=1.0, batched=True, batch_size_pose=16):
+def jbf_inference_grouped(model, frames, det_results, rescale_ratio=1.0, batched=True, batch_size_pose=16):
     assert len(frames) == len(det_results)
-
+    total_frames = len(frames)
     data = list(zip(frames, det_results))
     pose_samples = []
+    bbox_list = []
 
     if batched:
         batches = [data[i:i+batch_size_pose] for i in range(0, len(data), batch_size_pose)]
-        for batch in batches:
+        del frames
+        for i, batch in enumerate(batches):
             batch_frames, batch_det_results = zip(*batch)
-            batch_pose_samples = inference_topdown_batch(model, batch_frames, batch_det_results, bbox_format='xyxy')
+            batch_frames = list(batch_frames)
+            batch_frames_next = cp.deepcopy(batch_frames)
+            batch_frames_next.pop(0)
+            batch_frames_next.append(batch_frames_next[-1] if i == len(batches) - 1 else batches[i+1][0][0])
+            batch_frames = [np.concatenate([frame, frame_next], axis=-1) for frame, frame_next in zip(batch_frames, batch_frames_next)]
+            batch_pose_samples, batch_bbox_list = inference_topdown_batch_grouped(model, batch_frames, batch_det_results, bbox_format='xyxy')
             pose_samples.extend(batch_pose_samples)
+            bbox_list.extend(batch_bbox_list)
     else:
-        for frame, det_result in data:
-            pose_sample = inference_topdown(model, frame, det_result, bbox_format='xyxy')
-            pose_samples.append(pose_sample)
+        for i, frame, det_result in enumerate(data):
+            frame_next = cp.deepcopy(frame) if i == total_frames - 1 else frames[i+1]
+            frame = np.concatenate([frame, frame_next], axis=-1)
+            pose_sample, bbox = inference_topdown_grouped(model, frame, det_result, bbox_format='xyxy')
+            pose_samples.extend(pose_sample)
+            bbox_list.extend(bbox)
 
     jbf_seq = []
-    for i, pose_sample in enumerate(pose_samples):
-        bbox = det_results[i]
-        jbf = generate_jbf(pose_sample, bbox, rescale_ratio)
+    jbf_boxes = []
+    print(bbox_list[0])
+    for pose_sample, bbox in zip(pose_samples, bbox_list):
+        jbf = generate_jbf(pose_sample, rescale_ratio)
         jbf_seq.append(jbf)
+
+        bbox_center, bbox_scale = bbox_xyxy2cs(bbox, padding=1.25)
+        w, h = np.hsplit(bbox_scale, [1])
+        bbox_scale = np.where(w > h, np.hstack([w, w]), np.hstack([h, h]))
+        bbox = bbox_cs2xyxy(bbox_center, bbox_scale)
+        jbf_boxes.append(bbox[0])
     
-    return jbf_seq
+    return jbf_seq, jbf_boxes
+
+def jbf_inference_individual(model, frames, det_results, num_person, rescale_ratio=1.0, batched=True, batch_size_pose=16):
+    assert len(frames) == len(det_results)
+    total_frames = len(frames)
+    data = list(zip(frames, det_results))
+    pose_samples_list = []
+
+    if batched:
+        batches = [data[i:i+batch_size_pose] for i in range(0, len(data), batch_size_pose)]
+        for i, batch in enumerate(batches):
+            batch_frames, batch_det_results = zip(*batch)
+            batch_frames = list(batch_frames)
+            batch_frames_next = cp.deepcopy(batch_frames)
+            batch_frames_next.pop(0)
+            batch_frames_next.append(batch_frames_next[-1] if i == len(batches) - 1 else batches[i+1][0][0])
+            batch_frames = [np.concatenate([frame, frame_next], axis=-1) for frame, frame_next in zip(batch_frames, batch_frames_next)]
+            batch_pose_samples = inference_topdown_batch(model, batch_frames, batch_det_results, bbox_format='xyxy')
+            pose_samples_list.extend(batch_pose_samples)
+    else:
+        for i, frame, det_result in enumerate(data):
+            frame_next = cp.deepcopy(frame) if i == total_frames - 1 else frames[i+1]
+            frame = np.concatenate([frame, frame_next], axis=-1)
+            pose_samples = inference_topdown(model, frame, det_result, bbox_format='xyxy')
+            pose_samples_list.append(pose_samples)
+
+    jbf_seq = [[] for _ in range(num_person)]
+    jbf_boxes = np.zeros((num_person, total_frames, 4), dtype=np.float32)
+    for i, pose_samples in enumerate(pose_samples_list):
+        for j, pose_sample in enumerate(pose_samples):
+            mask = pose_sample.pred_fields.heatmaps.detach().cpu().numpy()
+            jbf = generate_jbf(mask, rescale_ratio)
+            bbox = pose_sample.pred_instances.bboxes
+            bbox_center, bbox_scale = bbox_xyxy2cs(bbox)
+            w, h = np.hsplit(bbox_scale, [1])
+            bbox_scale = np.where(w > h, np.hstack([w, w]), np.hstack([h, h]))
+            bbox = bbox_cs2xyxy(bbox_center, bbox_scale)
+            jbf_boxes[j, i] = bbox.squeeze()
+            jbf_seq[j].append(jbf)
+        for j in range(len(pose_samples), num_person):
+            jbf_seq[j].append(generate_jbf(np.zeros_like(mask), rescale_ratio))
+
+    return jbf_seq, jbf_boxes
 
 def load_jbf_model(jbf_config, jbf_ckpt, flow_ckpt):
     model = init_model(jbf_config, jbf_ckpt, 'cuda')
@@ -119,6 +192,10 @@ def load_models(det_config, det_ckpt, skl_config, skl_ckpt, jbf_config, jbf_ckpt
 def parse_args():
     parser = argparse.ArgumentParser(
         description='Generate 2D pose annotations for a custom video dataset')
+    parser.add_argument('--mode', type=str, choices=['video_grouped', 'image_grouped', 'image_individual'], default='all_in_one',
+                        help='mode for generating JBF. video_grouped: use the box of the whole video and all people in the video'
+                             'image_grouped: use the box of each image and all people in the image'
+                             'image_individual: use the box of each image and each person in the image')
     parser.add_argument('--det-config', type=str, default=default_det_config)
     parser.add_argument('--det-ckpt', type=str, default=default_det_ckpt)
     parser.add_argument('--skl-config', type=str, default=default_skl_config)
@@ -128,17 +205,15 @@ def parse_args():
     parser.add_argument('--flow-ckpt', type=str, default=default_flow_ckpt)
     parser.add_argument('--video-dir', type=str, help='input video directory')
     parser.add_argument('--out-dir', type=str, help='output JBF directory')
+    parser.add_argument('--out-anno-dir', type=str, help='output annotation directory')
     parser.add_argument('--rescale-ratio', type=float, help='rescale ratio for JBF', default=4.0)
     parser.add_argument('--batched', action='store_true', help='whether to use batched inference')
-    parser.add_argument('--batch-size-outer', type=int, default=64)
     parser.add_argument('--batch-size-det', type=int, default=16)
     parser.add_argument('--batch-size-jbf', type=int, default=16)
     # * Only det boxes with score larger than det_score_thr will be kept
     parser.add_argument('--det-score-thr', type=float, default=0.7)
     # * Only det boxes with large enough sizes will be kept,
     parser.add_argument('--det-area-thr', type=float, default=1600)
-    parser.add_argument('--out', type=str, help='output pickle name')
-    parser.add_argument('--tmpdir', type=str, default='tmp')
     parser.add_argument('--local-rank', type=int, default=0)
     # * When non-dist is set, will only use 1 GPU
     parser.add_argument('--non-dist', action='store_true', help='whether to use distributed skeleton extraction')
@@ -162,12 +237,9 @@ def main():
     print('Initializing distributed environment...')
     if args.non_dist:
         my_part = annos
-        os.makedirs(args.tmpdir, exist_ok=True)
     else:
         init_dist('pytorch', backend='nccl')
         rank, world_size = get_dist_info()
-        if rank == 0:
-            os.makedirs(args.tmpdir, exist_ok=True)
         dist.barrier()
         my_part = annos[rank::world_size]
 
@@ -175,100 +247,68 @@ def main():
     det_model, skl_model, jbf_model = load_models(args.det_config, args.det_ckpt, args.skl_config, args.skl_ckpt, 
                                                   args.jbf_config, args.jbf_ckpt, args.flow_ckpt)
 
-    compact = JBFInferenceCompact(padding=0.25, threshold=10, hw_ratio=(1., 1.), allow_imgpad=True)
-    resize = JBFInferenceResize(scale=(256, 256), keep_ratio=False, interpolation='bilinear')
+    if args.mode == 'video_grouped':
+        compact = JBFInferenceCompact(padding=0.25, threshold=10, hw_ratio=(1., 1.), allow_imgpad=True)
+        resize = JBFInferenceResize(scale=(256, 256), keep_ratio=False, interpolation='bilinear')
+    else:
+        compact = lambda x: x
+        resize = lambda x: x
+
+    os.makedirs(args.out_dir, exist_ok=True)
+    os.makedirs(args.out_anno_dir, exist_ok=True)
 
     print('Generating JBF...')
-    os.makedirs(args.out_dir, exist_ok=True)
-    results = []
     for anno in tqdm(my_part):
+
+        # Extract frames
         frames = extract_frame(anno['filename'])
         frame_dir = anno['frame_dir']
 
-        batch_frames = [frames[i:i+args.batch_size_outer] for i in range(0, len(frames), args.batch_size_outer)]
+        # Get detection results
+        det_results = det_inference(det_model, frames, args.det_score_thr, args.det_area_thr, batch_size_det=args.batch_size_det)
 
-        all_jbf_seqs = []
-        all_new_annos = []
-        all_det_results = []
-
-        for i, batch in enumerate(batch_frames):
-            det_results = det_inference(det_model, batch, batch_size_det=args.batch_size_det)
-            # * Get detection results for human
-            for j, det_sample in enumerate(det_results):
-                # * filter boxes with small scores
-                res = det_sample.pred_instances.bboxes.cpu().numpy()
-                scores = det_sample.pred_instances.scores.cpu().numpy()
-                res = res[scores >= args.det_score_thr]
-                # * filter boxes with small areas
-                box_areas = (res[:, 3] - res[:, 1]) * (res[:, 2] - res[:, 0])
-                assert np.all(box_areas >= 0)
-                res = res[box_areas >= args.det_area_thr]
-                det_results[j] = res
-            all_det_results.extend(det_results)
-
-        total_frames = len(frames)
-        num_person = max([len(x) for x in all_det_results])
-        anno['total_frames'] = total_frames
-        anno['num_person_raw'] = num_person
-
-        batch_det_results = [all_det_results[j:j+args.batch_size_outer] for j in range(0, len(all_det_results), args.batch_size_outer)]
-
-        for i, (batch, det_results) in enumerate(zip(batch_frames, batch_det_results)):
-            new_anno = cp.deepcopy(anno)
-
-            shape = batch[0].shape[:2]
-            new_anno['img_shape'] = shape
-            new_anno = skl_inference(new_anno, skl_model, batch, det_results)
-
-            all_new_annos.append(new_anno)
-        
-        anno['keypoint'] = np.concatenate([x['keypoint'] for x in all_new_annos], axis=1)
-        anno['keypoint_score'] = np.concatenate([x['keypoint_score'] for x in all_new_annos], axis=1)
-        anno['img_shape'] = all_new_annos[0]['img_shape']
+        # Prepare annotation
+        anno['total_frames'] = len(frames)
+        anno['num_person_raw'] = max([len(x) for x in det_results])
+        anno['img_shape'] = frames[0].shape[:2]
         anno['modality'] = 'Pose'
         anno['label'] = -1
-        anno['imgs'] = frames
-        anno.pop('filename')
 
+        # Get skeleton results
+        anno = skl_inference(anno, skl_model, frames, det_results)
+        
+        # Compact and resize for video_grouped mode
+        anno['imgs'] = frames
         anno = compact(anno)
         anno = resize(anno)
-
         frames = anno['imgs']
-        batch_frames = [frames[j:j+args.batch_size_outer] for j in range(0, len(frames), args.batch_size_outer)]
-
-        for i, (batch, det_results) in enumerate(zip(batch_frames, batch_det_results)):
-            batch_next = cp.deepcopy(batch)
-            batch_next.pop(0)
-            batch_next.append(batch[-1] if i + 1 == len(batch_frames) else batch_frames[i+1][0])
-            batch_ = np.concatenate([batch, batch_next], axis=-1)
-
-            jbf_seq = jbf_inference(jbf_model, batch_, det_results, args.rescale_ratio, args.batched, args.batch_size_jbf)
-            all_jbf_seqs.extend(jbf_seq)
-
+        anno.pop('filename')
         anno.pop('imgs')
-        results.append(anno)
-        out_fn = osp.join(args.out_dir, f'{frame_dir}.npy')
-        save_jbf_seq(jbf_seq, out_fn)
 
-    print('Saving results...')
-    if args.non_dist:
-        dump(results, args.out)
-    else:
-        dump(results, osp.join(args.tmpdir, f'part_{rank}.pkl'))
-        dist.barrier()
+        # Get JBF results
+        if args.mode in ['video_grouped', 'image_grouped']:
+            jbf_seq, jbf_boxes = jbf_inference_grouped(jbf_model, frames, det_results, args.rescale_ratio, args.batched, args.batch_size_jbf)
+            anno['jbf_boxes'] = np.stack(jbf_boxes)
+            out_anno_fn = osp.join(args.out_anno_dir, f'{frame_dir}.pkl')
+            dump(anno, out_anno_fn)
+            out_fn = osp.join(args.out_dir, f'{frame_dir}.npy')
+            save_jbf_seq(jbf_seq, out_fn)
 
-        if rank == 0:
-            parts = [load(osp.join(args.tmpdir, f'part_{i}.pkl')) for i in range(world_size)]
-            rem = len(annos) % world_size
-            if rem:
-                for i in range(rem, world_size):
-                    parts[i].append(None)
+        elif args.mode == 'image_individual':
+            jbf_seq, jbf_boxes = jbf_inference_individual(jbf_model, frames, det_results, anno['num_person_raw'], args.rescale_ratio, args.batched, args.batch_size_jbf)
+            for i in range(anno['num_person_raw']):
+                anno_i = cp.deepcopy(anno)
+                new_frame_dir_i = f'{frame_dir}_{i}'
+                anno_i['frame_dir'] = new_frame_dir_i
+                anno_i['jbf_boxes'] = jbf_boxes[i]
+                anno_i['keypoint'] = anno['keypoint'][i:i+1]
+                anno_i['keypoint_score'] = anno['keypoint_score'][i:i+1]
+                jbf_seq_i = [x[i] for x in jbf_seq]
+                out_anno_fn = osp.join(args.out_anno_dir, f'{new_frame_dir_i}.pkl')
+                dump(anno_i, out_anno_fn)
+                out_fn = osp.join(args.out_dir, f'{new_frame_dir_i}.npy')
+                save_jbf_seq(jbf_seq_i, out_fn)
 
-            ordered_results = []
-            for res in zip(*parts):
-                ordered_results.extend(list(res))
-            ordered_results = ordered_results[:len(annos)]
-            dump(ordered_results, args.out)
 
 if __name__ == '__main__':
     main()

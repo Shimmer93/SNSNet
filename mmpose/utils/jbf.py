@@ -1,3 +1,4 @@
+from typing import List
 import numpy as np
 import cv2
 from PIL import Image
@@ -11,8 +12,11 @@ def encode_mask(mask: Image):
     encoded_mask = np.frombuffer(encoded_mask.getvalue(), dtype=np.uint8)
     return encoded_mask
 
-def generate_jbf(pose_sample: PoseDataSample, bbox, rescale_ratio=1.0):
-    masks = pose_sample.pred_fields.heatmaps.detach().cpu().numpy()
+def generate_jbf(pose_sample, rescale_ratio=1.0):
+    if isinstance(pose_sample, PoseDataSample):
+        masks = pose_sample.pred_fields.heatmaps.detach().cpu().numpy()
+    else:
+        masks = pose_sample
 
     joint_map_volume = masks[1:-1]
     body_map = masks[0:1]
@@ -30,6 +34,34 @@ def generate_jbf(pose_sample: PoseDataSample, bbox, rescale_ratio=1.0):
     jbf = encode_mask(jbf)
     
     return jbf
+
+def encode_jbf(pose_samples: List[PoseDataSample], num_people, rescale_ratio=1.0):
+
+    jbfs = []
+    for pose_sample in pose_samples:
+        masks = pose_sample.pred_fields.heatmaps.detach().cpu().numpy()
+        joint_map_volume = masks[1:-1]
+        body_map = masks[0:1]
+        flow_map = masks[-1:]
+        jbf = np.concatenate([joint_map_volume, body_map, flow_map], axis=0)
+        jbfs.append(jbf)
+    num_people_left = num_people - len(jbfs)
+    if num_people_left > 0:
+        jbf = np.zeros_like(jbfs[0])
+        jbfs.extend([jbf] * num_people_left)
+    jbfs = np.concatenate(jbfs, axis=0)
+
+    h, w = jbfs.shape[-2:]
+    dsize = (int(w/rescale_ratio), int(h/rescale_ratio))
+    jbfs = np.stack([cv2.resize(m, dsize=dsize, interpolation=cv2.INTER_LINEAR) for m in jbfs])
+    jbfs = (jbfs > 0.5).astype(np.uint8) * 255
+    
+    mJ, H, W = jbfs.shape
+    jbfs = jbfs.reshape(mJ*H, W)
+    jbfs = Image.fromarray(jbfs)
+    jbfs = encode_mask(jbfs)
+    
+    return jbfs
 
 def save_jbf_seq(jbf_seq, file_path):
     np.save(file_path, np.array(jbf_seq, dtype=object), allow_pickle=True)
